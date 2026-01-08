@@ -173,7 +173,7 @@ def filter_items(q: str, folder: str, starts_with: Optional[str] = None):
       items = [it for it in items if it["filename"].lower().startswith(sw)]
 
   if not q:
-    return items
+    return sorted(items, key=lambda x: (x["filename"].lower(), x["relpath"].lower()))
 
   scored = []
   for it in items:
@@ -182,6 +182,16 @@ def filter_items(q: str, folder: str, starts_with: Optional[str] = None):
       scored.append((s, it))
   scored.sort(key=lambda x: x[0], reverse=True)
   return [it for _, it in scored]
+
+def randomize_items(items, seed: str):
+    if not seed:
+        return items
+    def _key(it):
+        h = hashlib.sha1()
+        h.update(seed.encode("utf-8"))
+        h.update(it["id"].encode("utf-8"))
+        return h.hexdigest()
+    return sorted(items, key=_key)
 
 def make_page(items, offset: int, limit: int):
     chunk = items[offset: offset + limit]
@@ -216,6 +226,7 @@ HTML = r"""
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
   <title>Local Reels Feed</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 128 128'%3E%3Crect width='128' height='128' rx='24' fill='%23FFD54F'/%3E%3Ccircle cx='46' cy='52' r='8' fill='%23000'/%3E%3Ccircle cx='82' cy='52' r='8' fill='%23000'/%3E%3Cpath d='M36 76c6 14 22 24 28 24s22-10 28-24' fill='none' stroke='%23000' stroke-width='10' stroke-linecap='round'/%3E%3C/svg%3E" />
   <style>
     :root {
       --bg: #0b0b0c;
@@ -380,6 +391,7 @@ HTML = r"""
       user-select: none;
     }
     .btn:hover { background: rgba(255,255,255,0.06); }
+    .btn.toggleOn { background: var(--text); color: var(--bg); font-weight: 600; }
 
     /* Loading */
     .loading {
@@ -567,6 +579,8 @@ let currentFolder = "";
 let observer = null;
 let currentLetter = "";
 let uiHidden = false;
+let randomMode = true;
+let randomSeed = "";
 
 function toast(msg) {
   toastEl.textContent = msg;
@@ -633,7 +647,16 @@ function buildCard(item) {
     window.open("/file/" + encodeURIComponent(item.relpath), "_blank");
   });
 
+  const randomBtn = document.createElement("div");
+  randomBtn.className = "btn randomToggle";
+  randomBtn.textContent = randomMode ? "Random: on" : "Random: off";
+  randomBtn.addEventListener("click", async () => {
+    setRandomMode(!randomMode);
+    await loadPage(true);
+  });
+
   actions.appendChild(openBtn);
+  actions.appendChild(randomBtn);
 
   overlay.appendChild(meta);
   overlay.appendChild(actions);
@@ -642,6 +665,36 @@ function buildCard(item) {
   card.appendChild(overlay);
 
   return card;
+}
+
+function makeRandomSeed() {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2);
+}
+
+function updateRandomButtons() {
+  document.querySelectorAll(".randomToggle").forEach(btn => {
+    btn.textContent = randomMode ? "Random: on" : "Random: off";
+    btn.classList.toggle("toggleOn", randomMode);
+  });
+}
+
+function setRandomMode(enabled) {
+  randomMode = enabled;
+  if (randomMode && !randomSeed) {
+    randomSeed = makeRandomSeed();
+  }
+  if (!randomMode) {
+    randomSeed = "";
+  } else {
+    currentLetter = "";
+    alphaBarEl.querySelectorAll(".alphaItem").forEach(el => el.classList.remove("active"));
+    const allAlpha = alphaBarEl.querySelector('.alphaItem[title="All"]');
+    if (allAlpha) allAlpha.classList.add("active");
+  }
+  updateRandomButtons();
+  if (randomMode) {
+    toast("Random mode on");
+  }
 }
 
 function setupObserver() {
@@ -707,8 +760,10 @@ async function loadPage(reset=false) {
 
   const q = encodeURIComponent(currentQuery);
   const fol = encodeURIComponent(currentFolder);
-  const sw = encodeURIComponent(currentLetter.toLowerCase());
-  const url = `/api/feed?q=${q}&folder=${fol}&starts_with=${sw}&offset=${offset}&limit=${pageSize}`;
+  const sw = randomMode ? "" : encodeURIComponent(currentLetter.toLowerCase());
+  const rand = randomMode ? "1" : "0";
+  const seed = encodeURIComponent(randomSeed);
+  const url = `/api/feed?q=${q}&folder=${fol}&starts_with=${sw}&offset=${offset}&limit=${pageSize}&random=${rand}&seed=${seed}`;
 
   try {
     const data = await fetchJSON(url);
@@ -719,9 +774,14 @@ async function loadPage(reset=false) {
     }
 
     offset += data.items.length;
-    hintEl.textContent = `${total} match(es) • showing ${Math.min(offset, total)}/${total}`;
+    if (randomMode) {
+      hintEl.textContent = `${total} total • random order • showing ${Math.min(offset, total)}/${total}`;
+    } else {
+      hintEl.textContent = `${total} match(es) • showing ${Math.min(offset, total)}/${total}`;
+    }
 
     setupObserver();
+    updateRandomButtons();
 
     // autoplay first visible
     const first = document.querySelector(".card");
@@ -744,6 +804,11 @@ async function loadPage(reset=false) {
 
 const updateSuggest = debounce(async () => {
   const q = (qEl.value || "").trim();
+  if (randomMode) {
+    suggestEl.classList.remove("show");
+    suggestEl.innerHTML = "";
+    return;
+  }
   if (!q) {
     suggestEl.classList.remove("show");
     suggestEl.innerHTML = "";
@@ -886,9 +951,7 @@ toggleUiBtn.addEventListener("click", () => {
 
   async function finishInit() {
     await loadFolders();
-    currentLetter = "A";
-    const firstAlpha = alphaBarEl.querySelector('.alphaItem[title="Starts with A"]');
-    if (firstAlpha) firstAlpha.classList.add("active");
+    setRandomMode(true);
     await loadPage(true);
   }
 })();
@@ -906,6 +969,10 @@ toggleUiBtn.addEventListener("click", () => {
     div.textContent = ch === "All" ? "•" : ch;
     div.title = ch === "All" ? "All" : `Starts with ${ch}`;
     div.addEventListener("click", async () => {
+      if (randomMode) {
+        toast("Turn off Random to use A–Z");
+        return;
+      }
       currentLetter = ch === "All" ? "" : ch;
       // update active state
       alphaBarEl.querySelectorAll(".alphaItem").forEach(el => el.classList.remove("active"));
@@ -935,6 +1002,8 @@ def api_feed():
   q = request.args.get("q", "")
   folder = request.args.get("folder", "")
   starts_with = (request.args.get("starts_with", "") or "").strip() or None
+  random_mode = request.args.get("random", "0") == "1"
+  seed = request.args.get("seed", "")
   try:
       offset = int(request.args.get("offset", "0"))
       limit = int(request.args.get("limit", str(DEFAULT_PAGE_SIZE)))
@@ -945,7 +1014,10 @@ def api_feed():
       offset = 0
   limit = max(1, min(limit, MAX_PAGE_SIZE))
 
-  items = filter_items(q, folder, starts_with)
+  if random_mode:
+      items = randomize_items(INDEX["items"], seed)
+  else:
+      items = filter_items(q, folder, starts_with)
   return jsonify(make_page(items, offset, limit))
 
 @app.route("/api/suggest")
