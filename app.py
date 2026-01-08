@@ -792,10 +792,14 @@ toggleUiBtn.addEventListener("click", () => {
   await loadPage(true);
 })();
 
-// Build A-Z sidebar
+// Build A-Z, numbers, and symbols sidebar
 (function buildAlphaBar(){
-  const letters = ["All"].concat(Array.from({length:26}, (_,i)=>String.fromCharCode(65+i)));
-  letters.forEach(ch => {
+  const lettersNumbersAndSymbols = ["All"].concat(
+    Array.from({length:26}, (_,i)=>String.fromCharCode(65+i))
+    .concat(Array.from({length:10}, (_,i)=>i.toString()))
+    .concat(["#", "@", "&", "$"])
+  );
+  lettersNumbersAndSymbols.forEach(ch => {
     const div = document.createElement("div");
     div.className = "alphaItem";
     div.textContent = ch === "All" ? "•" : ch;
