@@ -465,6 +465,55 @@ HTML = r"""
       height: 100vh;
       max-height: 100vh;
     }
+
+    /* Timer Modal */
+    .modal {
+      display: none;
+      position: fixed;
+      z-index: 200;
+      left: 0; top: 0;
+      width: 100%; height: 100%;
+      background: rgba(0,0,0,0.8);
+      backdrop-filter: blur(4px);
+      align-items: center;
+      justify-content: center;
+    }
+    .modal.show { display: flex; }
+    .modalContent {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      padding: 24px;
+      border-radius: 20px;
+      text-align: center;
+      box-shadow: var(--shadow);
+      width: 90%; max-width: 320px;
+    }
+    .modalTitle { font-size: 18px; font-weight: 600; margin-bottom: 12px; }
+    .modalDesc { font-size: 14px; color: var(--muted); margin-bottom: 20px; }
+    .timerInput {
+      background: rgba(255,255,255,0.1);
+      border: 1px solid var(--line);
+      color: var(--text);
+      padding: 12px;
+      border-radius: 12px;
+      width: 120px;
+      text-align: center;
+      font-size: 18px;
+      margin-bottom: 24px;
+      outline: none;
+    }
+    .modalActions { display: flex; gap: 10px; justify-content: center; }
+    .modalBtn {
+      flex: 1;
+      padding: 10px;
+      border-radius: 12px;
+      font-size: 13px;
+      cursor: pointer;
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,0.05);
+      color: var(--text);
+    }
+    .modalBtn.primary { background: var(--text); color: var(--bg); font-weight: 600; }
   </style>
 </head>
 <body>
@@ -486,6 +535,18 @@ HTML = r"""
   <div id="shutdown" class="btn" style="position: fixed; bottom: 12px; left: 70px; background: rgba(220,30,30,0.9); color: white;">Shutdown</div>
   <div id="toggleUi" class="btn" style="position: fixed; bottom: 12px; left: 170px; background: rgba(48,178,96,0.9); color: #0b0b0c; font-weight: 600;">Hide UI</div>
   <div id="alphaBar" class="alphaBar"></div>
+
+  <div id="timerModal" class="modal">
+    <div class="modalContent">
+      <div class="modalTitle">Auto Shutdown</div>
+      <div class="modalDesc">Optional: Shut down server after X minutes?</div>
+      <input id="timerInput" class="timerInput" type="number" placeholder="mins" min="1" inputmode="numeric" />
+      <div class="modalActions">
+        <div id="timerSkip" class="modalBtn">Skip</div>
+        <div id="timerSet" class="modalBtn primary">Set Timer</div>
+      </div>
+    </div>
+  </div>
 
 <script>
 const feedEl = document.getElementById("feed");
@@ -784,12 +845,52 @@ toggleUiBtn.addEventListener("click", () => {
 });
 
 (async function init() {
-  await loadFolders();
-  // Start with 'A' selected by default (alphabetically first)
-  currentLetter = "A";
-  const firstAlpha = alphaBarEl.querySelector('.alphaItem[title="Starts with A"]');
-  if (firstAlpha) firstAlpha.classList.add("active");
-  await loadPage(true);
+  // Timer Modal Logic
+  const timerModal = document.getElementById("timerModal");
+  const timerInput = document.getElementById("timerInput");
+  const timerSet = document.getElementById("timerSet");
+  const timerSkip = document.getElementById("timerSkip");
+
+  function closeTimer() {
+    timerModal.classList.remove("show");
+    finishInit();
+  }
+
+  async function setTimer() {
+    const val = parseInt(timerInput.value, 10);
+    if (val > 0) {
+      try {
+        await fetch("/shutdown", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({ minutes: val })
+        });
+        toast(`Server stops in ${val} mins`);
+      } catch(e) { console.error(e); }
+      closeTimer();
+    } else {
+      if (!timerInput.value) closeTimer(); 
+      else alert("Enter valid minutes");
+    }
+  }
+
+  timerSet.addEventListener("click", setTimer);
+  timerSkip.addEventListener("click", closeTimer);
+  timerInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") setTimer();
+  });
+
+  // Show modal immediately
+  timerModal.classList.add("show");
+  timerInput.focus();
+
+  async function finishInit() {
+    await loadFolders();
+    currentLetter = "A";
+    const firstAlpha = alphaBarEl.querySelector('.alphaItem[title="Starts with A"]');
+    if (firstAlpha) firstAlpha.classList.add("active");
+    await loadPage(true);
+  }
 })();
 
 // Build A-Z, numbers, and symbols sidebar
@@ -920,10 +1021,15 @@ def open_file(relpath: str):
 @app.route("/shutdown", methods=["POST"])
 def shutdown():
   environ = request.environ
+  data = request.get_json(silent=True) or {}
+  delay_mins = float(data.get("minutes", 0))
 
-  def _shutdown(env):
-    # Slight delay to allow response to be sent before exiting
-    time.sleep(0.2)
+  def _shutdown(env, delay_m):
+    if delay_m > 0:
+        time.sleep(delay_m * 60)
+    else:
+        time.sleep(0.2)
+    
     func = env.get("werkzeug.server.shutdown")
     if callable(func):
       try:
@@ -931,11 +1037,12 @@ def shutdown():
         return
       except Exception:
         pass
-    # Fallback: forcefully exit the process (works across servers)
+    # Fallback
     os._exit(0)
 
-  threading.Thread(target=_shutdown, args=(environ,), daemon=True).start()
-  return jsonify({"message": "Server shutting down..."})
+  threading.Thread(target=_shutdown, args=(environ, delay_mins), daemon=True).start()
+  msg = f"Server will stop in {delay_mins} mins" if delay_mins > 0 else "Server shutting down..."
+  return jsonify({"message": msg})
 
 def main():
     import argparse
