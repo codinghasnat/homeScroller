@@ -6,6 +6,7 @@ import threading
 import hashlib
 from pathlib import Path
 from urllib.parse import unquote
+from typing import Optional
 
 from flask import Flask, request, jsonify, send_file, abort, Response, render_template_string
 
@@ -158,29 +159,29 @@ def score_match(q: str, filename: str, relpath: str) -> int:
             score += 60
     return score
 
-def filter_items(q: str, folder: str, starts_with: str | None = None):
+def filter_items(q: str, folder: str, starts_with: Optional[str] = None):
   q = (q or "").strip()
   folder = safe_norm(folder or "")
   items = INDEX["items"]
 
   if folder:
-      items = [it for it in items if it["folder"] == folder or it["folder"].startswith(folder + "/")]
+    items = [it for it in items if it["folder"] == folder or it["folder"].startswith(folder + "/")]
 
   if starts_with:
     sw = starts_with.strip().lower()
     if sw:
       items = [it for it in items if it["filename"].lower().startswith(sw)]
 
-    if not q:
-        return items
+  if not q:
+    return items
 
-    scored = []
-    for it in items:
-        s = score_match(q, it["filename"], it["relpath"])
-        if s > 0:
-            scored.append((s, it))
-    scored.sort(key=lambda x: x[0], reverse=True)
-    return [it for _, it in scored]
+  scored = []
+  for it in items:
+    s = score_match(q, it["filename"], it["relpath"])
+    if s > 0:
+      scored.append((s, it))
+  scored.sort(key=lambda x: x[0], reverse=True)
+  return [it for _, it in scored]
 
 def make_page(items, offset: int, limit: int):
     chunk = items[offset: offset + limit]
@@ -446,17 +447,23 @@ HTML = r"""
     .alphaItem:hover { background: rgba(255,255,255,0.1); color: var(--text); }
     .alphaItem.active { background: var(--text); color: var(--bg); font-weight: bold; box-shadow: 0 2px 8px rgba(255,255,255,0.2); }
 
-    /* UI Toggling */
-    body.ui-hidden .topbar,
-    body.ui-hidden .alphaBar,
-    body.ui-hidden .overlay,
-    body.ui-hidden #shutdown {
-      display: none !important;
+    /* UI Hidden State */
+    body.hideUI .topbar,
+    body.hideUI .alphaBar,
+    body.hideUI .overlay,
+    body.hideUI #shutdown { display: none; }
+    body.hideUI #toggleUi {
+      left: auto;
+      right: 12px;
+      bottom: 12px;
     }
-    
-    /* Allow tapping anywhere to bring back UI when hidden */
-    body.ui-hidden .card {
-      cursor: pointer;
+    body.hideUI .feed {
+      left: 0;
+      padding-top: 0;
+    }
+    body.hideUI .card {
+      height: 100vh;
+      max-height: 100vh;
     }
   </style>
 </head>
@@ -476,7 +483,8 @@ HTML = r"""
 
   <div id="feed" class="feed"></div>
   <div id="toast" class="toast"></div>
-  <div id="shutdown" class="btn" style="position: fixed; bottom: 12px; left: 70px; background: red; color: white; opacity: 0.9;">Shutdown</div>
+  <div id="shutdown" class="btn" style="position: fixed; bottom: 12px; left: 70px; background: rgba(220,30,30,0.9); color: white;">Shutdown</div>
+  <div id="toggleUi" class="btn" style="position: fixed; bottom: 12px; left: 170px; background: rgba(48,178,96,0.9); color: #0b0b0c; font-weight: 600;">Hide UI</div>
   <div id="alphaBar" class="alphaBar"></div>
 
 <script>
@@ -487,6 +495,7 @@ const suggestEl = document.getElementById("suggest");
 const hintEl = document.getElementById("hint");
 const toastEl = document.getElementById("toast");
 const alphaBarEl = document.getElementById("alphaBar");
+const toggleUiBtn = document.getElementById("toggleUi");
 
 let offset = 0;
 let total = 0;
@@ -496,6 +505,7 @@ let currentQuery = "";
 let currentFolder = "";
 let observer = null;
 let currentLetter = "";
+let uiHidden = false;
 
 function toast(msg) {
   toastEl.textContent = msg;
@@ -517,15 +527,11 @@ async function fetchJSON(url) {
   return await res.json();
 }
 
-  // tap to mute/unmute
-  v.addEventListener("click", () => {
-    if (document.body.classList.contains("ui-hidden")) {
-       document.body.classList.remove("ui-hidden");
-    } else {
-       v.muted = !v.muted;
-       toast(v.muted ? "Muted" : "Unmuted");
-    }
-  });
+function buildCard(item) {
+  const card = document.createElement("div");
+  card.className = "card";
+  card.dataset.id = item.id;
+
   const v = document.createElement("video");
   v.src = item.url;
   v.playsInline = true;
@@ -546,6 +552,11 @@ async function fetchJSON(url) {
   const meta = document.createElement("div");
   meta.className = "meta";
 
+  const filename = document.createElement("div");
+  filename.className = "filename";
+  filename.textContent = item.filename;
+  meta.appendChild(filename);
+
   const folder = document.createElement("div");
   folder.className = "folder";
   folder.textContent = item.folder ? item.folder : "(root)";
@@ -554,16 +565,6 @@ async function fetchJSON(url) {
   const actions = document.createElement("div");
   actions.className = "actions";
 
-  const hideBtn = document.createElement("div");
-  hideBtn.className = "btn";
-  hideBtn.textContent = "Hide UI";
-  hideBtn.addEventListener("click", (e) => {
-    e.stopPropagation();
-    document.body.classList.toggle("ui-hidden");
-    const isHidden = document.body.classList.contains("ui-hidden");
-    toast(isHidden ? "UI Hidden (Tap to show)" : "UI Visible");
-  });
-
   const openBtn = document.createElement("div");
   openBtn.className = "btn";
   openBtn.textContent = "Open file";
@@ -571,7 +572,6 @@ async function fetchJSON(url) {
     window.open("/file/" + encodeURIComponent(item.relpath), "_blank");
   });
 
-  actions.appendChild(hideBtn);
   actions.appendChild(openBtn);
 
   overlay.appendChild(meta);
@@ -666,6 +666,11 @@ async function loadPage(reset=false) {
     const first = document.querySelector(".card");
     if (first && reset) {
       first.scrollIntoView({ behavior: "instant", block: "start" });
+      // Auto-play the first video
+      const firstVideo = first.querySelector("video");
+      if (firstVideo) {
+        firstVideo.play().catch(() => {});
+      }
     }
 
   } catch (e) {
@@ -771,8 +776,19 @@ document.getElementById("shutdown").addEventListener("click", async () => {
   }
 });
 
+toggleUiBtn.addEventListener("click", () => {
+  uiHidden = !uiHidden;
+  document.body.classList.toggle("hideUI", uiHidden);
+  toggleUiBtn.textContent = uiHidden ? "Show UI" : "Hide UI";
+  toast(uiHidden ? "UI Hidden" : "UI Visible");
+});
+
 (async function init() {
   await loadFolders();
+  // Start with 'A' selected by default (alphabetically first)
+  currentLetter = "A";
+  const firstAlpha = alphaBarEl.querySelector('.alphaItem[title="Starts with A"]');
+  if (firstAlpha) firstAlpha.classList.add("active");
   await loadPage(true);
 })();
 
